@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # Artix Linux Installer
-# LUKS2 + LVM + Btrfs | OpenRC | UEFI | SDDM + Hyprland + Plymouth
+# LUKS2 + LVM + Btrfs | OpenRC | UEFI | SDDM + Hyprland
 # =============================================================================
 set -euo pipefail
 
@@ -69,15 +69,14 @@ success "Keyrings OK"
 # Live ISOs ship the old monolithic gcc-libs; basestrap pulls the new split
 # packages (libgcc + libstdc++) which conflict — force-overwrite to resolve
 info "Fixing gcc-libs split package conflict..."
-pacman -Sy --noconfirm --overwrite '*' gcc-libs 2>&1 | tail -2
+pacman -Sy --noconfirm \
+    --overwrite '/usr/lib/libgcc*' \
+    --overwrite '/usr/lib/libstdc*' \
+    gcc-libs 2>&1 | tail -2
 success "gcc-libs OK"
 
 # ─── Mirrors ──────────────────────────────────────────────────────────────────
 info "Optimising mirrors..."
-pacman -S --noconfirm --needed reflector 2>&1 | tail -2
-reflector --protocol https --sort rate --latest 20 --fastest 10 \
-    --save /etc/pacman.d/mirrorlist 2>&1 | grep -v "^$" \
-    || warn "reflector failed — keeping existing mirrorlist"
 
 # Arch mirrorlist for [extra] repo used in chroot
 curl -s "https://archlinux.org/mirrorlist/?country=all&protocol=https&use_mirror_status=on" \
@@ -118,7 +117,8 @@ success "Prerequisites OK"
 
 # ─── Clock ────────────────────────────────────────────────────────────────────
 info "Syncing clock..."
-timedatectl set-ntp true 2>/dev/null || ntpd -qg 2>/dev/null || true
+ntpd -qg 2>/dev/null || sntp -S pool.ntp.org 2>/dev/null || \
+    warn "Could not sync clock — continuing with current time"
 success "Clock OK"
 
 # =============================================================================
@@ -232,13 +232,13 @@ success "Partitioned"
 # =============================================================================
 header "LUKS + LVM"
 
-echo -n "$LUKS_PASS" | cryptsetup luksFormat \
+printf '%s' "$LUKS_PASS" | cryptsetup luksFormat \
     --type luks2 --cipher aes-xts-plain64 \
     --key-size 512 --hash sha512 \
     --pbkdf argon2id --iter-time "$ITER_TIME" \
     "$PART_LUKS" -
 
-echo -n "$LUKS_PASS" | cryptsetup open "$PART_LUKS" "$LUKS_NAME" -
+printf '%s' "$LUKS_PASS" | cryptsetup open "$PART_LUKS" "$LUKS_NAME" -
 success "LUKS opened"
 
 pvcreate "$LUKS_DEV"
@@ -258,18 +258,17 @@ mkfs.fat -F32 -n EFI "$PART_BOOT"
 mkfs.btrfs -L artix "$LV_ROOT"
 
 mount "$LV_ROOT" /mnt
-for sv in @ @home @log @pkg @snapshots; do
+for sv in @ @home @log @pkg; do
     btrfs subvolume create "/mnt/$sv"
 done
 umount /mnt
 
 BTRFS_OPTS="noatime,compress=zstd:3,space_cache=v2,discard=async"
 mount -o "${BTRFS_OPTS},subvol=@"          "$LV_ROOT" /mnt
-mkdir -p /mnt/{boot,home,var/log,var/cache/pacman/pkg,.snapshots}
+mkdir -p /mnt/{boot,home,var/log,var/cache/pacman/pkg}
 mount -o "${BTRFS_OPTS},subvol=@home"      "$LV_ROOT" /mnt/home
 mount -o "${BTRFS_OPTS},subvol=@log"       "$LV_ROOT" /mnt/var/log
 mount -o "${BTRFS_OPTS},subvol=@pkg"       "$LV_ROOT" /mnt/var/cache/pacman/pkg
-mount -o "${BTRFS_OPTS},subvol=@snapshots" "$LV_ROOT" /mnt/.snapshots
 mount "$PART_BOOT" /mnt/boot
 success "Filesystems mounted"
 
@@ -281,6 +280,7 @@ header "Base Install (will take a while)"
 basestrap /mnt \
     base base-devel \
     openrc elogind-openrc \
+    dbus dbus-openrc \
     linux linux-headers linux-firmware \
     btrfs-progs cryptsetup lvm2 \
     grub efibootmgr \
@@ -299,7 +299,6 @@ success "Base installed"
 # =============================================================================
 header "fstab"
 fstabgen -U /mnt >> /mnt/etc/fstab
-# fstabgen picks up LVM swap via blkid automatically
 success "fstab generated"
 
 # =============================================================================
@@ -308,22 +307,38 @@ success "fstab generated"
 header "Chroot Configuration"
 
 LUKS_UUID=$(blkid -s UUID -o value "$PART_LUKS")
-SWAP_UUID=$(blkid -s UUID -o value "$LV_SWAP")
 info "LUKS UUID: $LUKS_UUID"
-info "Swap UUID: $SWAP_UUID"
 
-# Persist both mirroslists into the new system
+# Persist both mirrorlists into the new system
 mkdir -p /mnt/etc/pacman.d
 cp /etc/pacman.d/mirrorlist       /mnt/etc/pacman.d/mirrorlist
 cp /etc/pacman.d/mirrorlist-arch  /mnt/etc/pacman.d/mirrorlist-arch
 
-cat > /mnt/root/configure.sh << CHROOT_SCRIPT
+# Write dynamic values to a file the chroot script sources.
+# printf '%q' shell-escapes passwords so special chars ($, `, \) survive.
+cat > /mnt/root/.install-vars << VARS_EOF
+INST_HOSTNAME=$(printf '%q' "$HOSTNAME")
+INST_LUKS_UUID=$LUKS_UUID
+INST_LUKS_NAME=$LUKS_NAME
+INST_LV_ROOT=$LV_ROOT
+INST_VG_NAME=$VG_NAME
+INST_ROOT_PASS=$(printf '%q' "$ROOT_PASS")
+INST_USER_PASS=$(printf '%q' "$USER_PASS")
+INST_USERNAME=$(printf '%q' "$USERNAME")
+VARS_EOF
+chmod 600 /mnt/root/.install-vars
+
+# Quoted heredoc — no variable expansion by the outer shell
+cat > /mnt/root/configure.sh << 'CHROOT_SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
 
 BLUE='\033[0;34m'; GREEN='\033[0;32m'; BOLD='\033[1m'; RESET='\033[0m'
-info()    { echo -e "\${BLUE}[INFO]\${RESET}  \$*"; }
-success() { echo -e "\${GREEN}[OK]\${RESET}    \$*"; }
+info()    { echo -e "${BLUE}[INFO]${RESET}  $*"; }
+success() { echo -e "${GREEN}[OK]${RESET}    $*"; }
+
+# Source installer variables
+source /root/.install-vars
 
 # ─── Timezone + locale ────────────────────────────────────────────────────────
 ln -sf /usr/share/zoneinfo/America/Chicago /etc/localtime
@@ -334,35 +349,34 @@ echo "LANG=en_US.UTF-8" > /etc/locale.conf
 success "Locale configured"
 
 # ─── Hostname ─────────────────────────────────────────────────────────────────
-echo "${HOSTNAME}" > /etc/hostname
+echo "$INST_HOSTNAME" > /etc/hostname
 cat > /etc/hosts << EOF
 127.0.0.1   localhost
 ::1         localhost
-127.0.1.1   ${HOSTNAME}.localdomain ${HOSTNAME}
+127.0.1.1   ${INST_HOSTNAME}.localdomain ${INST_HOSTNAME}
 EOF
-success "Hostname: ${HOSTNAME}"
+success "Hostname: $INST_HOSTNAME"
 
 # ─── mkinitcpio ───────────────────────────────────────────────────────────────
-# Hook order matches reference install
 sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block encrypt lvm2 filesystems resume fsck)/' \
     /etc/mkinitcpio.conf
 mkinitcpio -P
 success "initramfs built"
 
 # ─── GRUB ─────────────────────────────────────────────────────────────────────
-sed -i 's/^#\(GRUB_ENABLE_CRYPTODISK.*\)/\1/' /etc/default/grub
-GRUB_PARAMS="cryptdevice=UUID=${LUKS_UUID}:${LUKS_NAME} root=${LV_ROOT} rootflags=subvol=@ resume=UUID=${SWAP_UUID} quiet"
-sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"\${GRUB_PARAMS}\"|" /etc/default/grub
+# /boot is on the unencrypted EFI partition — GRUB_ENABLE_CRYPTODISK is NOT
+# needed and would cause a redundant passphrase prompt before the kernel.
+GRUB_PARAMS="cryptdevice=UUID=${INST_LUKS_UUID}:${INST_LUKS_NAME} root=${INST_LV_ROOT} rootflags=subvol=@ resume=/dev/${INST_VG_NAME}/swap quiet"
+sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"${GRUB_PARAMS}\"|" /etc/default/grub
 grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=artix --recheck
 grub-mkconfig -o /boot/grub/grub.cfg
 success "GRUB installed"
 
-
 # ─── Users ────────────────────────────────────────────────────────────────────
-echo "root:${ROOT_PASS}" | chpasswd
+echo "root:${INST_ROOT_PASS}" | chpasswd
 useradd -m -G wheel,audio,video,input,storage,optical,network,power \
-    -s /bin/bash "${USERNAME}"
-echo "${USERNAME}:${USER_PASS}" | chpasswd
+    -s /bin/bash "$INST_USERNAME"
+echo "${INST_USERNAME}:${INST_USER_PASS}" | chpasswd
 sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
 success "Users configured"
 
@@ -390,8 +404,11 @@ pacman -S --noconfirm hyprland sddm sddm-openrc kitty
 rc-update add sddm default
 success "Desktop installed"
 
+# ─── Cleanup secrets ─────────────────────────────────────────────────────────
+rm -f /root/.install-vars
+
 echo ""
-echo -e "\${GREEN}\${BOLD}Chroot done.\${RESET}"
+echo -e "${GREEN}${BOLD}Chroot done.${RESET}"
 CHROOT_SCRIPT
 
 chmod +x /mnt/root/configure.sh
@@ -402,7 +419,7 @@ artix-chroot /mnt /root/configure.sh
 # =============================================================================
 header "Cleanup"
 
-rm -f /mnt/root/configure.sh
+rm -f /mnt/root/configure.sh /mnt/root/.install-vars
 swapoff "$LV_SWAP"          2>/dev/null || true
 umount -R /mnt              2>/dev/null || true
 vgchange -an "$VG_NAME"     2>/dev/null || true
@@ -421,5 +438,4 @@ echo -e "  GRUB will ask for your LUKS passphrase, then SDDM starts."
 echo ""
 echo -e "  ${YELLOW}Notes:${RESET}"
 echo -e "  • Swap: LVM on LUKS ${SWAP_GB}G — hibernation works"
-echo -e "  • Plymouth theme: bgrt (UEFI logo) or spinner"
 echo ""

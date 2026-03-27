@@ -18,8 +18,33 @@ header()  { echo -e "\n${BOLD}════════════════�
 
 [[ $EUID -eq 0 ]] && die "Run as your regular user, not root."
 
-# paru resolves both official repos and AUR transparently
-install() { paru -S --noconfirm --needed "$@"; }
+# ─── Resilient installer ─────────────────────────────────────────────────────
+# Tries the full batch first (fast). If anything in the batch fails, falls back
+# to installing each package individually so one bad package doesn't block the
+# rest. All failures are collected and reported at the end.
+ALL_FAILED=()
+
+install() {
+    local pkgs=("$@")
+    local failed=()
+
+    if yay -S --noconfirm --needed "${pkgs[@]}" 2>&1; then
+        return 0
+    fi
+
+    warn "Batch failed — retrying packages one by one..."
+    for pkg in "${pkgs[@]}"; do
+        if ! yay -S --noconfirm --needed "$pkg" 2>&1; then
+            warn "  ✗ $pkg"
+            failed+=("$pkg")
+        fi
+    done
+
+    if [[ ${#failed[@]} -gt 0 ]]; then
+        ALL_FAILED+=("${failed[@]}")
+    fi
+    return 0
+}
 
 # =============================================================================
 # REPOS
@@ -62,19 +87,19 @@ sudo pacman -Sy --noconfirm
 success "Repos configured"
 
 # =============================================================================
-# PARU
+# YAY (AUR helper)
 # =============================================================================
-header "Installing paru"
+header "Installing yay"
 
-if ! command -v paru &>/dev/null; then
+if ! command -v yay &>/dev/null; then
     sudo pacman -S --noconfirm --needed git base-devel
     tmp=$(mktemp -d)
-    git clone https://aur.archlinux.org/paru.git "$tmp/paru"
-    (cd "$tmp/paru" && makepkg -si --noconfirm)
+    git clone https://aur.archlinux.org/yay.git "$tmp/yay"
+    (cd "$tmp/yay" && makepkg -si --noconfirm)
     rm -rf "$tmp"
-    success "paru installed"
+    success "yay installed"
 else
-    success "paru already present"
+    success "yay already present"
 fi
 
 # =============================================================================
@@ -87,7 +112,9 @@ install \
     btrfs-progs lvm2 efibootmgr grub grub-btrfs \
     fwupd dkms smartmontools dmidecode \
     usbutils pciutils man-db inotify-tools \
-    exfatprogs cronie sysstat lm_sensors
+    exfatprogs cronie cronie-openrc sysstat lm_sensors \
+    htop vim mesa-utils memtest86+ memtest86+-efi \
+    archlinux-contrib
 
 sudo rc-update add cronie default
 sudo rc-service cronie start 2>/dev/null || true
@@ -99,12 +126,14 @@ success "Base system installed"
 header "Networking & Security"
 
 install \
-    openssh nmap mtr traceroute bind socat sshfs \
-    nss-mdns dnsmasq tailscale cloudflared \
-    wireshark-qt strace tcsh iw
+    openssh openssh-openrc \
+    nmap mtr traceroute bind socat sshfs \
+    nss-mdns dnsmasq tailscale tailscale-openrc cloudflared \
+    wireshark-qt strace tcsh iw iwd \
+    wireless_tools wpa_supplicant
 
-sudo rc-update add tailscale default
-sudo rc-service tailscale start 2>/dev/null || true
+sudo rc-update add tailscaled default
+sudo rc-service tailscaled start 2>/dev/null || true
 sudo usermod -aG wireshark "$USER"
 success "Networking installed"
 
@@ -123,9 +152,10 @@ install \
     the_silver_searcher thefuck \
     figlet lolcat cmatrix cowsay fastfetch \
     meson ninja patchelf perl-rename \
-    tk luarocks imagemagick pandoc-bin
+    tk luarocks imagemagick pandoc-bin \
+    ex-vi-compat shntool speech-dispatcher tint
 
-chsh -s /bin/zsh "$USER"
+sudo chsh -s /bin/zsh "$USER"
 success "Shell & CLI tools installed"
 
 # =============================================================================
@@ -134,7 +164,7 @@ success "Shell & CLI tools installed"
 header "Desktop Environment"
 
 install \
-    hyprland hypridle hyprlock hyprpicker hyprpaper uwsm \
+    hyprland hypridle hyprlock hyprpicker uwsm \
     sddm sddm-openrc \
     kitty konsole \
     waybar swaync swayosd cliphist \
@@ -143,13 +173,16 @@ install \
     xdg-desktop-portal-hyprland xdg-desktop-portal-gtk xdg-utils \
     polkit-gnome network-manager-applet libnotify \
     qt5-wayland qt5ct qt6-wayland qt6ct xsettingsd \
-    adw-gtk-theme \
+    adw-gtk-theme gnome-settings-daemon \
     noto-fonts noto-fonts-cjk noto-fonts-emoji noto-fonts-extra \
     ttf-jetbrains-mono-nerd maplemono-nf-cn \
     numix-circle-icon-theme-git archlinux-xdg-menu \
     matugen-bin awww gslapper \
-    imv mpv vlc vlc-plugins-all gst-plugin-pipewire
-
+    imv mpv vlc vlc-plugins-all gst-plugin-pipewire \
+    plymouth glfw kclock \
+    gtk3-demos gtk4-demos \
+    kf6-servicemenus-reimage \
+    xorg-server xorg-xhost xorg-xinit
 
 success "Desktop environment installed"
 
@@ -159,9 +192,13 @@ success "Desktop environment installed"
 header "Audio"
 
 install \
-    pipewire pipewire-alsa pipewire-jack pipewire-pulse \
-    wireplumber libpulse pwvucontrol
+    pipewire \
+    pipewire-alsa pipewire-jack pipewire-pulse \
+    wireplumber \
+    libpulse pwvucontrol
 
+# pipewire + wireplumber run as user-level services, started automatically
+# by the desktop session (uwsm / hyprland). No OpenRC service needed.
 success "Audio installed"
 
 # =============================================================================
@@ -189,16 +226,35 @@ header "Development Tools"
 
 install \
     nodejs-lts-jod npm python312 python311 \
-    docker docker-compose \
-    qemu-full libvirt virt-manager \
-    vscodium sqlitebrowser \
-    openrgb claude-code opencode
+    vscodium-bin sqlitebrowser \
+    openrgb opencode claude-code \
+    freecad pinta lmms puddletag upscayl-bin
+
+success "Dev tools installed"
+
+# =============================================================================
+# VIRTUALIZATION
+# =============================================================================
+header "Virtualization"
+
+install \
+    docker docker-openrc docker-compose \
+    qemu-full libvirt libvirt-openrc virt-manager \
+    edk2-ovmf iptables-nft dnsmasq
 
 sudo usermod -aG docker  "$USER"
 sudo usermod -aG libvirt "$USER"
-sudo rc-update add docker   default;  sudo rc-service docker   start 2>/dev/null || true
-sudo rc-update add libvirtd default;  sudo rc-service libvirtd start 2>/dev/null || true
-success "Dev tools installed"
+sudo rc-update add docker   default
+sudo rc-update add libvirtd default
+sudo rc-service docker   start 2>/dev/null || true
+sudo rc-service libvirtd start 2>/dev/null || true
+
+# Enable default NAT network for libvirt VMs
+if sudo virsh net-info default &>/dev/null; then
+    sudo virsh net-autostart default 2>/dev/null || true
+    sudo virsh net-start default 2>/dev/null || true
+fi
+success "Virtualization installed"
 
 # =============================================================================
 # GAMING
@@ -218,9 +274,19 @@ header "Productivity & Office"
 
 install \
     obsidian libreoffice-still gimp inkscape \
-    cups cups-pdf xournalpp calcurse \
-    zathura zathura-pdf-mupdf texlive-latex \
+    cups cups-openrc cups-pdf xournalpp calcurse \
+    zathura zathura-pdf-mupdf \
     flatpak
+
+# TeX Live — full set matching the source system
+install \
+    texlive-basic texlive-latex texlive-latexextra texlive-latexrecommended \
+    texlive-fontsextra texlive-fontsrecommended texlive-fontutils \
+    texlive-bibtexextra texlive-binextra texlive-context \
+    texlive-formatsextra texlive-games texlive-humanities \
+    texlive-luatex texlive-mathscience texlive-metapost \
+    texlive-music texlive-pictures texlive-plaingeneric \
+    texlive-pstricks texlive-publishers texlive-xetex
 
 sudo rc-update add cupsd default
 sudo rc-service cupsd start 2>/dev/null || true
@@ -237,10 +303,11 @@ install \
     kdeconnect kde-cli-tools ark dolphin dolphin-plugins \
     gnome-disk-utility gparted \
     bitwarden timeshift \
-    powertop power-profiles-daemon brightnessctl \
+    powertop power-profiles-daemon power-profiles-daemon-openrc brightnessctl \
     bluez bluez-utils bluetui \
     cava kdenlive \
-    vesktop zen-browser-bin localsend feishin
+    vesktop-bin zen-browser-bin localsend-bin feishin-bin \
+    syncthing
 
 sudo rc-update add power-profiles-daemon default
 sudo rc-service power-profiles-daemon start 2>/dev/null || true
@@ -301,22 +368,27 @@ success "System config done"
 # DONE
 # =============================================================================
 header "Post-Install Complete"
+
+# ─── Report failures ─────────────────────────────────────────────────────────
+if [[ ${#ALL_FAILED[@]} -gt 0 ]]; then
+    echo ""
+    warn "The following packages failed to install:"
+    printf "  ${RED}✗${RESET}  %s\n" "${ALL_FAILED[@]}"
+    echo ""
+    echo -e "  You can retry them manually:  ${BOLD}yay -S ${ALL_FAILED[*]}${RESET}"
+fi
+
 echo ""
 echo -e "  ${YELLOW}Remaining manual steps:${RESET}"
 echo ""
-echo -e "  ${BOLD}1. GPU drivers${RESET}"
-echo -e "     bash setup-gpu.sh"
-echo ""
-echo -e "  ${BOLD}2. CachyOS kernel${RESET}  (do last, after everything works)"
-echo -e "     paru -S cachyos-keyring cachyos-mirrorlist cachyos-v3-mirrorlist cachyos-v4-mirrorlist"
-echo -e "     paru -S linux-cachyos-bore linux-cachyos-bore-headers scx-scheds proton-cachyos"
+echo -e "  ${BOLD}1. CachyOS kernel${RESET}  (do last, after everything works)"
+echo -e "     yay -S cachyos-keyring cachyos-mirrorlist cachyos-v3-mirrorlist cachyos-v4-mirrorlist"
+echo -e "     yay -S linux-cachyos-bore linux-cachyos-bore-headers scx-scheds proton-cachyos"
 echo -e "     sudo grub-mkconfig -o /boot/grub/grub.cfg"
 echo ""
-echo -e "  ${BOLD}3. Reboot${RESET}  — group changes (docker, libvirt, wireshark) need a fresh login"
+echo -e "  ${BOLD}2. Reboot${RESET}  — group changes (docker, libvirt, wireshark) need a fresh login"
 echo ""
-echo -e "  ${BOLD}4. fcitx5${RESET}  — run fcitx5-configtool to configure input methods"
+echo -e "  ${BOLD}3. fcitx5${RESET}  — run fcitx5-configtool to configure input methods"
 echo ""
-echo -e "  ${BOLD}5. Tailscale${RESET}  — sudo tailscale up"
-echo ""
-echo -e "  ${BOLD}6. Syncthing${RESET}  — paru -S syncthing && sudo rc-update add syncthing default"
+echo -e "  ${BOLD}4. Tailscale${RESET}  — sudo tailscale up"
 echo ""
