@@ -134,6 +134,7 @@ install \
 
 sudo rc-update add tailscaled default
 sudo rc-service tailscaled start 2>/dev/null || true
+sudo tailscale set --operator="$USER" 2>/dev/null || true
 sudo usermod -aG wireshark "$USER"
 success "Networking installed"
 
@@ -326,22 +327,6 @@ install \
     elephant-runner-bin elephant-websearch-bin
 
 success "Walker + providers installed"
-
-# =============================================================================
-# ZRAM (OpenRC)
-# =============================================================================
-header "zram"
-
-install zramswap-openrc
-
-if [[ ! -f /etc/conf.d/zramswap ]]; then
-    sudo tee /etc/conf.d/zramswap > /dev/null << 'EOF'
-ZRAM_SIZE=4096
-ZRAM_ALGORITHM=zstd
-EOF
-fi
-sudo rc-update add zramswap boot
-success "zram configured (4G, zstd)"
 
 # =============================================================================
 # SYSTEM CONFIG
