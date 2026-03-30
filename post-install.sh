@@ -121,6 +121,17 @@ sudo rc-service cronie start 2>/dev/null || true
 success "Base system installed"
 
 # =============================================================================
+# AUTOFS (NAS auto-mounting)
+# =============================================================================
+header "Autofs"
+
+install autofs autofs-openrc
+
+sudo rc-update add autofs default
+sudo rc-service autofs start 2>/dev/null || true
+success "Autofs installed"
+
+# =============================================================================
 # NETWORKING & SECURITY
 # =============================================================================
 header "Networking & Security"
@@ -180,7 +191,7 @@ install \
     numix-circle-icon-theme-git archlinux-xdg-menu \
     matugen-bin awww gslapper \
     imv mpv vlc vlc-plugins-all gst-plugin-pipewire \
-    plymouth glfw kclock \
+    glfw kclock \
     gtk3-demos gtk4-demos \
     kf6-servicemenus-reimage \
     xorg-server xorg-xhost xorg-xinit
@@ -193,13 +204,15 @@ success "Desktop environment installed"
 header "Audio"
 
 install \
-    pipewire \
-    pipewire-alsa pipewire-jack pipewire-pulse \
-    wireplumber \
+    pipewire pipewire-openrc \
+    pipewire-alsa pipewire-jack pipewire-pulse pipewire-pulse-openrc \
+    wireplumber wireplumber-openrc \
     libpulse pwvucontrol
 
-# pipewire + wireplumber run as user-level services, started automatically
-# by the desktop session (uwsm / hyprland). No OpenRC service needed.
+# pipewire + wireplumber as user-level OpenRC services
+rc-update add pipewire default --user
+rc-update add pipewire-pulse default --user
+rc-update add wireplumber default --user
 success "Audio installed"
 
 # =============================================================================
@@ -340,12 +353,8 @@ if ! grep -q "mdns_minimal" /etc/nsswitch.conf 2>/dev/null; then
         /etc/nsswitch.conf
 fi
 
-# powertop auto-tune on boot
-sudo tee /etc/local.d/powertop.start > /dev/null << 'EOF'
-#!/bin/sh
-powertop --auto-tune
-EOF
-sudo chmod +x /etc/local.d/powertop.start
+# Remove powertop auto-tune if present (causes USB disconnects on reboot)
+sudo rm -f /etc/local.d/powertop.start
 
 success "System config done"
 

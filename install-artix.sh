@@ -286,7 +286,8 @@ basestrap /mnt \
     grub efibootmgr \
     networkmanager networkmanager-openrc \
     bluez bluez-openrc \
-    pipewire pipewire-pulse pipewire-alsa pipewire-jack wireplumber \
+    pipewire pipewire-openrc pipewire-pulse pipewire-pulse-openrc \
+    pipewire-alsa pipewire-jack wireplumber wireplumber-openrc \
     sof-firmware \
     sudo neovim nano \
     git curl wget \
@@ -385,7 +386,13 @@ rc-update add NetworkManager default
 rc-update add bluetoothd      default
 rc-update add elogind         boot
 rc-update add dbus            default
-success "Services enabled"
+success "System services enabled"
+
+# ─── Pipewire (user services) ────────────────────────────────────────────────
+su -l "$INST_USERNAME" -c "rc-update add pipewire default --user"
+su -l "$INST_USERNAME" -c "rc-update add pipewire-pulse default --user"
+su -l "$INST_USERNAME" -c "rc-update add wireplumber default --user"
+success "Pipewire user services enabled"
 
 # ─── Bluetooth ────────────────────────────────────────────────────────────────
 mkdir -p /etc/bluetooth
