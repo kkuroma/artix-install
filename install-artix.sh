@@ -277,21 +277,34 @@ success "Filesystems mounted"
 # =============================================================================
 header "Base Install (will take a while)"
 
-basestrap /mnt \
-    base base-devel \
-    openrc elogind-openrc \
-    dbus dbus-openrc \
-    linux linux-headers linux-firmware \
-    btrfs-progs cryptsetup lvm2 \
-    grub efibootmgr \
-    networkmanager networkmanager-openrc \
-    bluez bluez-openrc \
-    pipewire pipewire-openrc pipewire-pulse pipewire-pulse-openrc \
-    pipewire-alsa pipewire-jack wireplumber wireplumber-openrc \
-    sof-firmware \
-    sudo neovim nano \
-    git curl wget \
+BASE_PKGS=(
+    base base-devel
+    openrc elogind-openrc
+    dbus dbus-openrc
+    linux linux-headers linux-firmware
+    btrfs-progs cryptsetup lvm2
+    grub efibootmgr
+    networkmanager networkmanager-openrc
+    bluez bluez-openrc
+    pipewire pipewire-openrc pipewire-pulse pipewire-pulse-openrc
+    pipewire-alsa pipewire-jack wireplumber wireplumber-openrc
+    sof-firmware
+    sudo neovim nano
+    git curl wget
     man-db man-pages bash-completion
+)
+
+MAX_RETRIES=5
+for attempt in $(seq 1 "$MAX_RETRIES"); do
+    if basestrap /mnt "${BASE_PKGS[@]}"; then
+        break
+    fi
+    if [[ $attempt -eq $MAX_RETRIES ]]; then
+        die "basestrap failed after $MAX_RETRIES attempts"
+    fi
+    warn "basestrap failed (attempt $attempt/$MAX_RETRIES) — retrying in 5s..."
+    sleep 5
+done
 
 success "Base installed"
 
