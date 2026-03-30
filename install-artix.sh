@@ -401,12 +401,6 @@ rc-update add elogind         boot
 rc-update add dbus            default
 success "System services enabled"
 
-# ─── Pipewire (user services) ────────────────────────────────────────────────
-su -l "$INST_USERNAME" -c "rc-update add pipewire default --user"
-su -l "$INST_USERNAME" -c "rc-update add pipewire-pulse default --user"
-su -l "$INST_USERNAME" -c "rc-update add wireplumber default --user"
-success "Pipewire user services enabled"
-
 # ─── Bluetooth ────────────────────────────────────────────────────────────────
 mkdir -p /etc/bluetooth
 if [[ -f /etc/bluetooth/main.conf ]]; then
